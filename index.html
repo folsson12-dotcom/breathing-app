@@ -40,6 +40,13 @@
     .field+.field { border-top:1px solid #29414b80 }
     .field input[type="number"] { width:76px; min-height:42px; background:#091d2a; border:1px solid #516f79; border-radius:11px; padding:8px; color:white; font-size:17px; text-align:center }
     .field input[type="checkbox"] { width:24px; height:24px; flex:0 0 24px; accent-color:#81dfca }
+    .soundscape { margin-top:8px; padding-top:14px; border-top:1px solid #38515b; display:grid; gap:10px }
+    .soundscape-title { font-size:15px; font-weight:700; color:#dcebea }
+    .soundscape select { width:100%; min-height:50px; border:1px solid #516f79; border-radius:12px; padding:8px 40px 8px 12px; color:#edf8f6; background:#091d2a; font-size:15px }
+    .volume-row { min-height:44px; display:grid; grid-template-columns:auto 1fr 44px; align-items:center; gap:12px; color:#d0e0e2; font-size:14px }
+    .volume-row input { width:100%; accent-color:#81dfca }
+    .volume-row output { color:#a9c1c8; font-variant-numeric:tabular-nums; text-align:right }
+    .audio-note { margin:0; color:#8fabb2; font-size:12px; line-height:1.45 }
     .hint { font-size:13px; line-height:1.55; color:#a9c0c6; margin:17px 2px 0; text-align:left }
     .hidden { display:none }
     .footer { font-size:12px; line-height:1.45; color:#829fa7; margin-top:16px }
@@ -82,6 +89,21 @@
       </div>
       <label class="field">Sound cues<input id="sound" type="checkbox" checked></label>
       <label id="voiceField" class="field">Voice guidance<input id="voice" type="checkbox"></label>
+      <div class="soundscape">
+        <label class="soundscape-title" for="ambient">Background sound</label>
+        <select id="ambient">
+          <option value="off">Off</option>
+          <option value="drone">Ambient Drone &amp; Warm Synthesizers</option>
+          <option value="nature">Natural &amp; Organic Soundscapes</option>
+          <option value="acoustic">Acoustic Instrumental &amp; Neo-Classical</option>
+        </select>
+        <label class="volume-row" for="ambientVolume">
+          <span>Volume</span>
+          <input id="ambientVolume" type="range" min="0" max="100" value="35">
+          <output id="ambientLevel" for="ambientVolume">35%</output>
+        </label>
+        <p class="audio-note">Soft, seamless sound generated on your device. A subtle harmonic layer follows your breath.</p>
+      </div>
     </section>
     <p id="hint" class="hint">Breathe gently through your nose. If the rhythm feels uncomfortable, adjust the settings. Get some daylight after your session.</p>
     <div class="footer">Timing stays on track if the browser briefly pauses or your screen dims.</div>
@@ -94,25 +116,94 @@
     const pad = value => String(value).padStart(2, '0');
     const wallTime = () => Date.now();
     let mode = 'gentle', running = false, elapsed = 0, runStartedAt = 0, raf = 0;
-    let sequence = [], total = 180, completed = false, lastKey = -1, audio;
+    let sequence = [], total = 180, completed = false, lastKey = -1, audio, ambientState = null;
     const voiceAvailable = 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window;
     if (!voiceAvailable) { $('voice').disabled = true; $('voiceField').title = 'Voice guidance is not supported by this browser'; }
 
     function liveElapsed() { return running ? elapsed + Math.max(0, wallTime() - runStartedAt) / 1000 : elapsed; }
     function commitElapsed() { if (running) { elapsed = liveElapsed(); runStartedAt = wallTime(); } return elapsed; }
     function formatClock(seconds) { const whole = Math.max(0, Math.ceil(seconds)); return `${pad(Math.floor(whole / 60))}:${pad(whole % 60)}`; }
+    function getAudioContext() {
+      audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+      if (audio.state === 'suspended' || audio.state === 'interrupted') audio.resume();
+      return audio;
+    }
     function beep(freq = 550) {
       if (!$('sound').checked) return;
       try {
-        audio = audio || new (window.AudioContext || window.webkitAudioContext)();
-        if (audio.state === 'suspended') audio.resume();
-        const oscillator = audio.createOscillator(), gain = audio.createGain();
+        const context = getAudioContext(), oscillator = context.createOscillator(), gain = context.createGain();
         oscillator.frequency.value = freq; oscillator.type = 'sine';
-        gain.gain.setValueAtTime(.0001, audio.currentTime);
-        gain.gain.exponentialRampToValueAtTime(.055, audio.currentTime + .015);
-        gain.gain.exponentialRampToValueAtTime(.0001, audio.currentTime + .14);
-        oscillator.connect(gain).connect(audio.destination); oscillator.start(); oscillator.stop(audio.currentTime + .15);
+        gain.gain.setValueAtTime(.0001, context.currentTime);
+        gain.gain.exponentialRampToValueAtTime(.055, context.currentTime + .015);
+        gain.gain.exponentialRampToValueAtTime(.0001, context.currentTime + .14);
+        oscillator.connect(gain).connect(context.destination); oscillator.start(); oscillator.stop(context.currentTime + .15);
       } catch (error) { /* Audio cues are optional. */ }
+    }
+    function ambientVolume() { return num('ambientVolume', 0, 100) / 100 * .34; }
+    function stopAmbient(fade = .65) {
+      const state = ambientState;
+      ambientState = null;
+      if (!state) return;
+      const now = state.context.currentTime, end = now + fade;
+      state.master.gain.cancelScheduledValues(now);
+      state.master.gain.setValueAtTime(Math.max(.0001, state.master.gain.value), now);
+      state.master.gain.exponentialRampToValueAtTime(.0001, end);
+      state.sources.forEach(source => { try { source.stop(end + .05); } catch (error) { /* Already stopped. */ } });
+    }
+    function syncAmbientBreath(name) {
+      if (!ambientState) return;
+      const targets = { Inhale:.52, Recovery:.52, Pause:.34, Hold:.18, Exhale:.08, Release:.08 };
+      ambientState.breath.gain.setTargetAtTime(targets[name] ?? .16, ambientState.context.currentTime, .65);
+    }
+    function startAmbient() {
+      stopAmbient(.35);
+      const choice = $('ambient').value;
+      if (!running || choice === 'off') return;
+      try {
+        const context = getAudioContext(), sources = [];
+        const master = context.createGain(), filter = context.createBiquadFilter(), constant = context.createGain(), breath = context.createGain();
+        master.gain.setValueAtTime(.0001, context.currentTime);
+        master.gain.exponentialRampToValueAtTime(Math.max(.0001, ambientVolume()), context.currentTime + 1.8);
+        filter.type = 'lowpass'; filter.frequency.value = choice === 'nature' ? 1800 : 3600; filter.Q.value = .45;
+        constant.gain.value = .72; breath.gain.value = .16;
+        constant.connect(filter); breath.connect(filter); filter.connect(master); master.connect(context.destination);
+
+        const tone = (bus, frequency, level, type = 'sine', detune = 0) => {
+          const oscillator = context.createOscillator(), gain = context.createGain();
+          oscillator.type = type; oscillator.frequency.value = frequency; oscillator.detune.value = detune; gain.gain.value = level;
+          oscillator.connect(gain).connect(bus); oscillator.start(); sources.push(oscillator); return { oscillator, gain };
+        };
+        const lfo = (parameter, frequency, depth) => {
+          const oscillator = context.createOscillator(), gain = context.createGain();
+          oscillator.frequency.value = frequency; gain.gain.value = depth; oscillator.connect(gain).connect(parameter); oscillator.start(); sources.push(oscillator);
+        };
+
+        if (choice === 'drone') {
+          const root = tone(constant, 110, .34), fifth = tone(constant, 164.81, .18, 'sine', -4);
+          tone(constant, 220, .055, 'triangle', 3); tone(breath, 329.63, .12); tone(breath, 440, .035, 'sine', -6);
+          lfo(root.gain.gain, .055, .055); lfo(fifth.oscillator.detune, .041, 3.5);
+        } else if (choice === 'nature') {
+          const harmonicCount = 8192, real = new Float32Array(harmonicCount + 1), imaginary = new Float32Array(harmonicCount + 1);
+          for (let harmonic = 1; harmonic <= harmonicCount; harmonic++) {
+            const magnitude = 1 / Math.sqrt(harmonic), phase = Math.random() * Math.PI * 2;
+            real[harmonic] = magnitude * Math.cos(phase); imaginary[harmonic] = magnitude * Math.sin(phase);
+          }
+          const noise = context.createOscillator(), noiseGain = context.createGain();
+          noise.setPeriodicWave(context.createPeriodicWave(real, imaginary, { disableNormalization:false })); noise.frequency.value = .25; noiseGain.gain.value = .28;
+          noise.connect(noiseGain).connect(constant); noise.start(); sources.push(noise);
+          const tide = tone(constant, 55, .09), air = tone(breath, 196, .045, 'sine', -8);
+          tone(breath, 293.66, .025, 'sine', 6); lfo(tide.gain.gain, .075, .045); lfo(air.oscillator.detune, .032, 5);
+        } else {
+          const root = tone(constant, 220, .18, 'sine', -5), third = tone(constant, 261.63, .14, 'triangle', 4), fifth = tone(constant, 329.63, .11, 'sine', -3);
+          tone(breath, 440, .065, 'sine', 5); tone(breath, 523.25, .035, 'sine', -7);
+          lfo(root.gain.gain, .043, .045); lfo(third.gain.gain, .051, .035); lfo(fifth.oscillator.detune, .037, 4);
+        }
+        ambientState = { context, master, breath, sources };
+        const segment = findSegment(liveElapsed());
+        syncAmbientBreath(segment?.name);
+      } catch (error) {
+        ambientState = null;
+      }
     }
     function speak(text) {
       if (!voiceAvailable || !$('voice').checked) return;
@@ -175,7 +266,7 @@
       return 1.12;
     }
     function finish() {
-      elapsed = Number.isFinite(total) ? total : liveElapsed(); running = false; completed = true; cancelAnimationFrame(raf); beep(850); speak('Session complete');
+      elapsed = Number.isFinite(total) ? total : liveElapsed(); running = false; completed = true; cancelAnimationFrame(raf); stopAmbient(); beep(850); speak('Session complete');
     }
     function render(position = liveElapsed()) {
       const segment = findSegment(position), orb = $('orb');
@@ -191,7 +282,7 @@
         orb.className = 'orb'; orb.style.setProperty('--orb-scale', '.76'); orb.setAttribute('aria-label', 'Breathing timer ready'); return;
       }
       const key = sequence.indexOf(segment);
-      if (running && key !== lastKey) { beep(segment.name === 'Inhale' || segment.name === 'Recovery' ? 660 : 440); speak(phaseVoice(segment.name)); lastKey = key; }
+      if (running && key !== lastKey) { beep(segment.name === 'Inhale' || segment.name === 'Recovery' ? 660 : 440); speak(phaseVoice(segment.name)); syncAmbientBreath(segment.name); lastKey = key; }
       const phaseClass = segment.name === 'Inhale' ? 'inhale' : segment.name === 'Recovery' ? 'recovery' : segment.name === 'Hold' || segment.name === 'Pause' ? 'hold' : 'exhale';
       $('phase').textContent = segment.name;
       $('secs').textContent = segment.manual ? `${Math.floor(position - segment.start)}s` : `${Math.max(0, Math.ceil(segment.end - position))}s`;
@@ -203,7 +294,7 @@
     }
     function tick() { if (!running) return; const position = liveElapsed(); if (position >= total) finish(); render(completed ? elapsed : position); if (running) raf = requestAnimationFrame(tick); }
     function ensureTicking() { cancelAnimationFrame(raf); if (running) raf = requestAnimationFrame(tick); }
-    function reset() { running = false; cancelAnimationFrame(raf); stopVoice(); elapsed = 0; runStartedAt = 0; lastKey = -1; completed = false; build(); $('start').textContent = '▶ Start'; render(0); }
+    function reset() { running = false; cancelAnimationFrame(raf); stopVoice(); stopAmbient(); elapsed = 0; runStartedAt = 0; lastKey = -1; completed = false; build(); $('start').textContent = '▶ Start'; render(0); }
     function switchMode(nextMode) {
       mode = nextMode; const gentle = nextMode === 'gentle';
       $('gentleTab').classList.toggle('active', gentle); $('wimTab').classList.toggle('active', !gentle);
@@ -221,12 +312,17 @@
         if (!running) { running = true; runStartedAt = wallTime(); }
         render(position); ensureTicking(); return;
       }
-      if (running) { commitElapsed(); running = false; cancelAnimationFrame(raf); stopVoice(); }
-      else { running = true; runStartedAt = wallTime(); }
+      if (running) { commitElapsed(); running = false; cancelAnimationFrame(raf); stopVoice(); stopAmbient(); }
+      else { running = true; runStartedAt = wallTime(); startAmbient(); }
       render(liveElapsed()); ensureTicking();
     };
     document.querySelectorAll('input[type="number"]').forEach(input => input.addEventListener('change', () => { if (!running) reset(); }));
     $('voice').addEventListener('change', () => { if (!$('voice').checked) stopVoice(); else if (running) { const segment = findSegment(liveElapsed()); if (segment) speak(phaseVoice(segment.name)); } });
+    $('ambient').addEventListener('change', () => { if (running) startAmbient(); });
+    $('ambientVolume').addEventListener('input', () => {
+      $('ambientLevel').textContent = `${$('ambientVolume').value}%`;
+      if (ambientState) ambientState.master.gain.setTargetAtTime(Math.max(.0001, ambientVolume()), ambientState.context.currentTime, .18);
+    });
     // Animation frames are throttled when a phone screen dims. Wall-clock timing lets the next frame catch up exactly.
     document.addEventListener('visibilitychange', () => { if (!document.hidden) { render(liveElapsed()); ensureTicking(); } });
     window.addEventListener('pageshow', () => { render(liveElapsed()); ensureTicking(); });

@@ -31,14 +31,17 @@ class MockElement {
 }
 
 const defaults = { minutes:'3', inhale:'4', pause:'2', exhale:'4', rounds:'3', breaths:'30', win:'2', wout:'2', recovery:'15' };
-const ids = ['gentleTab','wimTab','gentleSettings','wimSettings','orb','phase','secs','detail','status','clock','start','reset','minutes','inhale','pause','exhale','rounds','breaths','win','wout','recovery','sound','voice','voiceField','hint'];
+const ids = ['gentleTab','wimTab','gentleSettings','wimSettings','orb','phase','secs','detail','status','clock','start','reset','minutes','inhale','pause','exhale','rounds','breaths','win','wout','recovery','sound','voice','voiceField','ambient','ambientVolume','ambientLevel','hint'];
 const elements = Object.fromEntries(ids.map(id => [id, new MockElement(id, defaults[id] ?? '')]));
 elements.gentleTab.className = 'active';
 elements.wimSettings.className = 'hidden';
+elements.ambient.value = 'off';
+elements.ambientVolume.value = '35';
 
 let now = 1_000_000;
 let nextFrameId = 1;
 const frames = new Map(), documentListeners = new Map(), windowListeners = new Map(), spoken = [];
+const audioStats = { started:0, stopped:0, periodicWaves:0 };
 const document = {
   hidden:false,
   getElementById:id => elements[id],
@@ -46,9 +49,34 @@ const document = {
   addEventListener:(type, listener) => documentListeners.set(type, listener)
 };
 class MockUtterance { constructor(text) { this.text = text; } }
+class MockAudioParam {
+  constructor(value = 0) { this.value = value; }
+  setValueAtTime(value) { this.value = value; }
+  exponentialRampToValueAtTime(value) { this.value = value; }
+  setTargetAtTime(value) { this.value = value; }
+  cancelScheduledValues() {}
+}
+class MockAudioNode {
+  constructor() {
+    this.gain = new MockAudioParam(1); this.frequency = new MockAudioParam(); this.detune = new MockAudioParam(); this.Q = new MockAudioParam(); this.type = 'sine';
+  }
+  connect() { return this; }
+  start() { audioStats.started++; }
+  stop() { audioStats.stopped++; }
+  setPeriodicWave() {}
+}
+class MockAudioContext {
+  constructor() { this.state = 'running'; this.currentTime = 0; this.destination = new MockAudioNode(); }
+  resume() { this.state = 'running'; }
+  createOscillator() { return new MockAudioNode(); }
+  createGain() { return new MockAudioNode(); }
+  createBiquadFilter() { return new MockAudioNode(); }
+  createPeriodicWave() { audioStats.periodicWaves++; return {}; }
+}
 const window = {
   speechSynthesis:{ cancel() {}, speak(utterance) { spoken.push(utterance.text); } },
   SpeechSynthesisUtterance:MockUtterance,
+  AudioContext:MockAudioContext,
   addEventListener:(type, listener) => windowListeners.set(type, listener)
 };
 const context = vm.createContext({
@@ -67,6 +95,10 @@ function advance(milliseconds) {
 
 assert.equal(elements.phase.textContent, 'Ready');
 assert.equal(elements.clock.textContent, '03:00');
+assert.match(html, /Ambient Drone &amp; Warm Synthesizers/);
+assert.match(html, /Natural &amp; Organic Soundscapes/);
+assert.match(html, /Acoustic Instrumental &amp; Neo-Classical/);
+assert.match(html, /filter\.type = 'lowpass'/);
 
 elements.start.click();
 assert.equal(elements.phase.textContent, 'Inhale');
@@ -118,5 +150,19 @@ assert.equal(elements.phase.textContent, 'Hold');
 assert.equal(elements.start.textContent, 'End hold');
 elements.start.click();
 assert.equal(elements.phase.textContent, 'Recovery');
+
+// Each background profile builds and starts a Web Audio graph, including the
+// periodic-wave generator used for the organic soundscape.
+for (const profile of ['drone', 'nature', 'acoustic']) {
+  elements.reset.click();
+  elements.ambient.value = profile;
+  const before = audioStats.started;
+  elements.start.click();
+  assert.ok(audioStats.started > before, `${profile} starts an audio graph`);
+}
+assert.ok(audioStats.periodicWaves > 0, 'organic soundscape uses seamless periodic noise');
+elements.ambientVolume.value = '52';
+elements.ambientVolume.dispatch('input');
+assert.equal(elements.ambientLevel.textContent, '52%');
 
 console.log('Morning Breath timer tests passed');
